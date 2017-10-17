@@ -23,7 +23,7 @@
 #define __GST_MFH264ENCODER_H__
 
 #include <gst/gst.h>
-#include <gst/base/gstbasetransform.h>
+#include <gst/video/gstvideoencoder.h>
 
 G_BEGIN_DECLS
 
@@ -42,13 +42,13 @@ typedef struct _Gstmfh264encoder      Gstmfh264encoder;
 typedef struct _Gstmfh264encoderClass Gstmfh264encoderClass;
 
 struct _Gstmfh264encoder {
-  GstBaseTransform element;
+  GstVideoEncoder element;
 
   gboolean silent;
 };
 
 struct _Gstmfh264encoderClass {
-  GstBaseTransformClass parent_class;
+  GstVideoEncoderClass parent_class;
 };
 
 GType gst_mfh264encoder_get_type (void);

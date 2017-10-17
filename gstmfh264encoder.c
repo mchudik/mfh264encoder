@@ -37,11 +37,10 @@
 #endif
 
 #include <gst/gst.h>
-#include <gst/base/base.h>
 #include <gst/controller/controller.h>
 
 #include "gstmfh264encoder.h"
-#pragma comment(lib, "gstbase-1.0.lib")
+#pragma comment(lib, "gstvideo-1.0.lib")
 
 GST_DEBUG_CATEGORY_STATIC (gst_mfh264encoder_debug);
 #define GST_CAT_DEFAULT gst_mfh264encoder_debug
@@ -80,15 +79,21 @@ GST_STATIC_PAD_TEMPLATE (
 );
 
 #define gst_mfh264encoder_parent_class parent_class
-G_DEFINE_TYPE (Gstmfh264encoder, gst_mfh264encoder, GST_TYPE_BASE_TRANSFORM);
+G_DEFINE_TYPE (Gstmfh264encoder, gst_mfh264encoder, GST_TYPE_VIDEO_ENCODER);
 
 static void gst_mfh264encoder_set_property (GObject * object, guint prop_id,
-    const GValue * value, GParamSpec * pspec);
+	const GValue * value, GParamSpec * pspec);
 static void gst_mfh264encoder_get_property (GObject * object, guint prop_id,
-    GValue * value, GParamSpec * pspec);
+	GValue * value, GParamSpec * pspec);
 
-static GstFlowReturn gst_mfh264encoder_transform_ip (GstBaseTransform * base,
-    GstBuffer * outbuf);
+static GstFlowReturn gst_mfh264encoder_handle_frame(GstVideoEncoder * encoder, 
+	GstVideoCodecFrame * frame);
+
+static gboolean gst_mfh264encoder_set_format(GstVideoEncoder * encoder,
+	GstVideoCodecState * state);
+
+static GstCaps * gst_mfh264encoderc_getcaps(GstVideoEncoder * encoder,
+	GstCaps * filter);
 
 /* GObject vmethod implementations */
 
@@ -106,22 +111,28 @@ gst_mfh264encoder_class_init (Gstmfh264encoderClass * klass)
   gobject_class->get_property = gst_mfh264encoder_get_property;
 
   g_object_class_install_property (gobject_class, PROP_SILENT,
-    g_param_spec_boolean ("silent", "Silent", "Produce verbose output ?",
-          FALSE, G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE));
+	g_param_spec_boolean ("silent", "Silent", "Produce verbose output ?",
+		  FALSE, G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE));
 
   gst_element_class_set_details_simple (gstelement_class,
-    "mfh264encoder",
-    "Generic/Filter",
-    "FIXME:Generic Template Filter",
-    "Martin <<user@hostname.org>>");
+	"mfh264encoder",
+	"Generic/Filter",
+	"FIXME:Generic Template Filter",
+	"Martin <<user@hostname.org>>");
 
   gst_element_class_add_pad_template (gstelement_class,
-      gst_static_pad_template_get (&src_template));
+	  gst_static_pad_template_get (&src_template));
   gst_element_class_add_pad_template (gstelement_class,
-      gst_static_pad_template_get (&sink_template));
+	  gst_static_pad_template_get (&sink_template));
 
-  GST_BASE_TRANSFORM_CLASS (klass)->transform_ip =
-      GST_DEBUG_FUNCPTR (gst_mfh264encoder_transform_ip);
+  GST_VIDEO_ENCODER_CLASS(klass)->handle_frame =
+	  GST_DEBUG_FUNCPTR(gst_mfh264encoder_handle_frame);
+
+  GST_VIDEO_ENCODER_CLASS(klass)->set_format =
+	  GST_DEBUG_FUNCPTR(gst_mfh264encoder_set_format);
+ 
+  GST_VIDEO_ENCODER_CLASS(klass)->getcaps =
+	  GST_DEBUG_FUNCPTR(gst_mfh264encoderc_getcaps);
 
   /* debug category for fltering log messages
    *
@@ -141,57 +152,71 @@ gst_mfh264encoder_init (Gstmfh264encoder *filter)
 
 static void
 gst_mfh264encoder_set_property (GObject * object, guint prop_id,
-    const GValue * value, GParamSpec * pspec)
+	const GValue * value, GParamSpec * pspec)
 {
   Gstmfh264encoder *filter = GST_MFH264ENCODER (object);
 
   switch (prop_id) {
-    case PROP_SILENT:
-      filter->silent = g_value_get_boolean (value);
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
+	case PROP_SILENT:
+	  filter->silent = g_value_get_boolean (value);
+	  break;
+	default:
+	  G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+	  break;
   }
 }
 
 static void
 gst_mfh264encoder_get_property (GObject * object, guint prop_id,
-    GValue * value, GParamSpec * pspec)
+	GValue * value, GParamSpec * pspec)
 {
   Gstmfh264encoder *filter = GST_MFH264ENCODER (object);
 
   switch (prop_id) {
-    case PROP_SILENT:
-      g_value_set_boolean (value, filter->silent);
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
+	case PROP_SILENT:
+	  g_value_set_boolean (value, filter->silent);
+	  break;
+	default:
+	  G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+	  break;
   }
 }
 
-/* GstBaseTransform vmethod implementations */
+/* GstVideoEncoder vmethod implementations */
 
 /* this function does the actual processing
  */
 static GstFlowReturn
-gst_mfh264encoder_transform_ip (GstBaseTransform * base, GstBuffer * outbuf)
+gst_mfh264encoder_handle_frame(GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
 {
-  Gstmfh264encoder *filter = GST_MFH264ENCODER (base);
+	// Encoding should happen here
+	frame->output_buffer = gst_buffer_copy(frame->input_buffer);
 
-  if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_TIMESTAMP (outbuf)))
-    gst_object_sync_values (GST_OBJECT (filter), GST_BUFFER_TIMESTAMP (outbuf));
-
-  if (filter->silent == FALSE)
-    g_print ("I'm plugged, therefore I'm in.\n");
-  
-  /* FIXME: do something interesting here.  This simply copies the source
-   * to the destination. */
-
-  return GST_FLOW_OK;
+	return gst_video_encoder_finish_frame(encoder, frame);
 }
 
+static gboolean
+gst_mfh264encoder_set_format(GstVideoEncoder * encoder,	GstVideoCodecState * state)
+{
+	GstCaps *caps = gst_caps_new_simple("video/x-raw",
+		"format", G_TYPE_STRING, "YUY2",
+		NULL);
+	
+	// Define compressed output format here
+	GstVideoCodecState *output_format = gst_video_encoder_set_output_state(encoder, caps, state);
+	gst_video_codec_state_unref(output_format);
+
+	return TRUE;
+}
+
+static GstCaps *
+gst_mfh264encoderc_getcaps(GstVideoEncoder * encoder, GstCaps * filter)
+{
+	GstCaps *caps = gst_caps_new_simple("video/x-raw",
+		"format", G_TYPE_STRING, "YUY2",
+		NULL);
+	return caps;
+}
 
 /* entry point to initialize the plug-in
  * initialize the plug-in itself
@@ -201,7 +226,7 @@ static gboolean
 mfh264encoder_init (GstPlugin * mfh264encoder)
 {
   return gst_element_register (mfh264encoder, "mfh264encoder", GST_RANK_NONE,
-      GST_TYPE_MFH264ENCODER);
+	  GST_TYPE_MFH264ENCODER);
 }
 
 /* PACKAGE: this is usually set by autotools depending on some _INIT macro
@@ -221,13 +246,13 @@ mfh264encoder_init (GstPlugin * mfh264encoder)
  * FIXME:exchange the string 'Template mfh264encoder' with you mfh264encoder description
  */
 GST_PLUGIN_DEFINE (
-    GST_VERSION_MAJOR,
-    GST_VERSION_MINOR,
-    mfh264encoder,
-    "Template mfh264encoder",
-    mfh264encoder_init,
-    VERSION,
-    "LGPL",
-    "GStreamer",
-    "http://gstreamer.net/"
+	GST_VERSION_MAJOR,
+	GST_VERSION_MINOR,
+	mfh264encoder,
+	"Template mfh264encoder",
+	mfh264encoder_init,
+	VERSION,
+	"LGPL",
+	"GStreamer",
+	"http://gstreamer.net/"
 )
