@@ -25,6 +25,16 @@
 #include <gst/gst.h>
 #include <gst/video/gstvideoencoder.h>
 
+#include "targetver.h"
+#define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#include <windows.h>
+#include "MFEncoderH264.h"
+
+#pragma comment(lib, "gstreamer-1.0.lib")
+#pragma comment(lib, "gobject-2.0.lib")
+#pragma comment(lib, "glib-2.0.lib")
+#pragma comment(lib, "intl.lib")
+
 G_BEGIN_DECLS
 
 #define GST_TYPE_MFH264ENCODER \
@@ -45,6 +55,7 @@ struct _Gstmfh264encoder {
   GstVideoEncoder element;
 
   gboolean silent;
+  CEncoderH264*	pH264Encoder;
 };
 
 struct _Gstmfh264encoderClass {

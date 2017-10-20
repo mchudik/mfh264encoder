@@ -35,10 +35,10 @@
     <ClCompile Include="dllmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="gstmfh264encoder.c">
+    <ClCompile Include="MFEncoderH264.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="MFEncoderH264.cpp">
+    <ClCompile Include="gstmfh264encoder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

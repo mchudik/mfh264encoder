@@ -25,6 +25,8 @@
 #pragma comment(lib, "wmcodecdspuuid")
 //Media Foundation Libraries
 
+#define CHECK_HR(val) { if ( (val) != S_OK ) { goto done; } }
+
 template <typename T, unsigned S>
 inline unsigned arraySize(const T(&arr)[S]) { return S; }
 
@@ -45,19 +47,27 @@ class CEncoderH264
 public:
 	CEncoderH264(const char* fileName, BOOL bWriteMP4, BOOL bWriteH264);
 	virtual ~CEncoderH264();
-	IMFSample* GetSavedSample() { return m_pDisconnectedSample; };
 	void Exiting() { m_bExiting = true; };
 
-	HRESULT ConfigureEncoder(IMFMediaType *pSourceType, IMFMediaType *pOutputType, UINT nVBRQuality, UINT nMeanBitrate, UINT nMaxBitrate = NULL); 
-	HRESULT CreateMFSampleFromBitmap(IMFMediaType* pMediaType, UINT nResourceId, IMFSample** pSample);
-	HRESULT ColorConvertMFSample(IMFSample* pSampleIn, IMFSample** pSampleOut, const GUID& guidOutputType, const RECT& rcFile, const RECT& rcFrame);
-	HRESULT CreateVideoMediaType(D3DFORMAT D3DFmt, DWORD dwWidth, DWORD dwHeight, IMFMediaType **ppMediaType);
-	HRESULT Encode(IMFSample *pSampleIn, BOOL bPause);
+	HRESULT ConfigureEncoder(DWORD fccFormat, UINT32 width, UINT32 height, MFRatio frameRate, UINT nVBRQuality, UINT nMeanBitrate, UINT nMaxBitrate);
+	HRESULT Encode(BYTE *pData, UINT32 dataSize, LONGLONG sampleTime, LONGLONG sampleDuration);
 	HRESULT Start();
 	HRESULT Stop();
 
 private:
-	IMFTransform*	m_pTransform;		
+	HRESULT CreateMFSampleFromMediaType(IMFMediaType* pMediaType, IMFSample** pSample);
+	HRESULT CopyAttribute(IMFAttributes *pSrc, IMFAttributes *pDest, const GUID& key);
+	HRESULT CreateUncompressedVideoType(
+		DWORD                fccFormat,  // FOURCC or D3DFORMAT value.     
+		UINT32               width,
+		UINT32               height,
+		MFVideoInterlaceMode interlaceMode,
+		const MFRatio&       frameRate,
+		const MFRatio&       par,
+		IMFMediaType         **ppType
+	);
+
+	IMFTransform*	m_pTransform;
 	FILE*			m_pH264File;
 	LONGLONG        m_hnsSampleTime;
 	LONGLONG        m_hnsSampleDuration;
@@ -65,10 +75,7 @@ private:
 	IMFMediaSink*	m_pMediaSink;
 	IMFStreamSink*	m_pStreamSink;
 	IMFSinkWriter*	m_pSinkWriter;
-	IMFSample*		m_pPauseSample;
-	IMFSample*		m_pDisconnectedSample;
-	IMFSample*		m_pStoppedSample;
-	BOOL			m_bSampleAfterPause;
+	IMFSample*		m_pSample;
 	ICodecAPI*		m_pCodecApi;
 	BOOL			m_bExiting;
 

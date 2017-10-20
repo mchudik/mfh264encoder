@@ -3,12 +3,9 @@
 
 #include "stdafx.h"
 #include "MFEncoderH264.h"
+#include <sstream>
 
-#ifndef IF_FAILED_GOTO
-#define IF_FAILED_GOTO(hr, label) if (FAILED(hr)) { goto label; }
-#endif
-
-#define CHECK_HR(hr) IF_FAILED_GOTO(hr, done)
+using namespace std;
 
 CEncoderH264::CEncoderH264(const char* fileName, BOOL bWriteMP4, BOOL bWriteH264)
 : m_pTransform(NULL)
@@ -19,10 +16,7 @@ CEncoderH264::CEncoderH264(const char* fileName, BOOL bWriteMP4, BOOL bWriteH264
 , m_pMediaSink(NULL)
 , m_pStreamSink(NULL)
 , m_pSinkWriter(NULL)
-, m_pPauseSample(NULL)
-, m_pDisconnectedSample(nullptr)
-, m_pStoppedSample(nullptr)
-, m_bSampleAfterPause(FALSE)
+, m_pSample(NULL)
 , m_pCodecApi(NULL)
 , m_bExiting(FALSE)
 {
@@ -103,9 +97,7 @@ CEncoderH264::~CEncoderH264()
 	SafeRelease(&m_pMediaSink);
 	SafeRelease(&m_pSinkWriter);
 	SafeRelease(&m_pMFBSOutputFile);
-	SafeRelease(&m_pPauseSample);
-	SafeRelease(&m_pDisconnectedSample);
-	SafeRelease(&m_pStoppedSample);
+	SafeRelease(&m_pSample);
 	SafeRelease(&m_pCodecApi);
 
 	if(m_pH264File) {
@@ -116,16 +108,50 @@ CEncoderH264::~CEncoderH264()
 	HRESULT hr = MFShutdown();
 }
 
-HRESULT CEncoderH264::ConfigureEncoder(IMFMediaType *pSourceType, IMFMediaType *pOutputType, UINT nVBRQuality, UINT nMeanBitrate, UINT nMaxBitrate)
+HRESULT CEncoderH264::ConfigureEncoder(DWORD fccFormat, UINT32 width, UINT32 height, MFRatio frameRate, UINT nVBRQuality, UINT nMeanBitrate, UINT nMaxBitrate)
 {
 	HRESULT hr = S_OK;
 	DWORD i = 0;
 	GUID subtype = { 0 };
 	GUID subtypeSource = { 0 };
 	IMFMediaType* pInputType = NULL;
-	UINT32 width = 0;
-	UINT32 height = 0;
-	LONG lStride = 0;
+	IMFMediaType* pSourceType = NULL;
+	IMFMediaType* pOutputType = NULL;
+	MFRatio par = { 1, 1 };
+
+	CHECK_HR(hr = CreateUncompressedVideoType(
+		fccFormat,  // FOURCC or D3DFORMAT value.     
+		width,	
+		height,	
+		MFVideoInterlace_Progressive,
+		frameRate,
+		par,
+		&pSourceType
+	));
+	CHECK_HR(hr = CreateMFSampleFromMediaType(pSourceType, &m_pSample));
+	CHECK_HR(hr = MFCreateMediaType(&pOutputType));
+
+	auto attributesToCopy = {
+		MF_MT_MAJOR_TYPE,
+		MF_MT_FRAME_SIZE,
+		MF_MT_FRAME_RATE,
+		MF_MT_PIXEL_ASPECT_RATIO,
+		MF_MT_INTERLACE_MODE
+	};
+
+	for (auto&& attribute : attributesToCopy) {
+		hr = CopyAttribute(pSourceType, pOutputType, attribute);
+		if (FAILED(hr)) {
+			if (hr == MF_E_ATTRIBUTENOTFOUND) {
+				hr = S_OK;
+			} else {
+				break;
+			}
+		}
+	}
+	CHECK_HR(hr = pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
+	CHECK_HR(hr = pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 1000000));
+	CHECK_HR(hr = pOutputType->SetUINT32(MF_MT_MAX_KEYFRAME_SPACING, 30));
 
 	if (!pSourceType)
 		return E_POINTER;
@@ -251,20 +277,7 @@ HRESULT CEncoderH264::ConfigureEncoder(IMFMediaType *pSourceType, IMFMediaType *
 		}
 		i++;
 	}
-/*
-	hr = CreateMFSampleFromBitmap(pSourceType, IDB_PNG_PAUSED, &m_pPauseSample);
-	if (FAILED(hr)) {
-		SafeRelease(&m_pPauseSample);
-	}
-	hr = CreateMFSampleFromBitmap(pSourceType, IDB_PNG_DISCONNECTED, &m_pDisconnectedSample);
-	if (FAILED(hr)) {
-		SafeRelease(&m_pDisconnectedSample);
-	}
-	hr = CreateMFSampleFromBitmap(pSourceType, IDB_PNG_STOPPED, &m_pStoppedSample);
-	if (FAILED(hr)) {
-		SafeRelease(&m_pStoppedSample);
-	}
-*/
+
 done:
 #ifdef DEBUG_MEDIA_TYPES
 	wprintf(L"CEncoderH264::ConfigureEncoder:pSourceType Media Type:\n");
@@ -278,9 +291,9 @@ done:
 	return hr;
 }
 
-HRESULT CEncoderH264::Encode(IMFSample *pSample, BOOL bPause)
+HRESULT CEncoderH264::Encode(BYTE *pGsData, UINT32 dataSize, LONGLONG sampleTime, LONGLONG sampleDuration)
 {
-	if (!pSample)
+	if (!m_pSample)
 	{
 		return E_INVALIDARG;
 	}
@@ -293,13 +306,12 @@ HRESULT CEncoderH264::Encode(IMFSample *pSample, BOOL bPause)
 	HRESULT hr = S_OK, hrRes = S_OK;
 	DWORD dwStatus = 0;
 	DWORD cbTotalLength = 0, cbCurrentLength = 0;
-	BYTE *pData = NULL;
-	LONGLONG phnsSampleDuration = NULL;
+	BYTE *pDataIn = NULL;
+	BYTE *pDataOut = NULL;
+	IMFMediaBuffer* pBufferIn = NULL;
 	IMFMediaBuffer* pBufferOut = NULL;
 	IMFSample* pSampleOut = NULL;
 	IMFMediaType* pMediaType = NULL;
-	LONGLONG rtStart = NULL;
-	LONGLONG rtDuration = NULL;
 
 	//get the size of the output buffer processed by the encoder.
 	//There is only one output so the output stream id is 0.
@@ -307,41 +319,15 @@ HRESULT CEncoderH264::Encode(IMFSample *pSample, BOOL bPause)
 	ZeroMemory(&mftStreamInfo, sizeof(MFT_OUTPUT_STREAM_INFO));
 	CHECK_HR (hr =  m_pTransform->GetOutputStreamInfo(0, &mftStreamInfo));
 	
+
 	//Send input to the encoder.
-	if(bPause) {
-		//Copy timing information to pause sample.
-		CHECK_HR (hr = pSample->GetSampleTime(&rtStart));
-		CHECK_HR (hr = pSample->GetSampleDuration(&rtDuration));
-		if (m_bExiting) {
-			CHECK_HR(hr = m_pStoppedSample->SetSampleTime(rtStart));
-			CHECK_HR(hr = m_pStoppedSample->SetSampleDuration(rtDuration));
-			CHECK_HR(hr = m_pTransform->ProcessInput(0, m_pStoppedSample, 0));
-		} else {
-			CHECK_HR(hr = m_pPauseSample->SetSampleTime(rtStart));
-			CHECK_HR(hr = m_pPauseSample->SetSampleDuration(rtDuration));
-			CHECK_HR(hr = m_pTransform->ProcessInput(0, m_pPauseSample, 0));
-		}
-		if(!m_bSampleAfterPause) {
-			VARIANT var;
-			VariantInit(&var);
-			var.vt = VT_UI4;
-			var.ulVal = 1;
-			CHECK_HR(hr = m_pCodecApi->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var));
-			CHECK_HR(hr = pSample->SetUINT32(MFSampleExtension_Discontinuity, TRUE));
-		}
-		m_bSampleAfterPause = TRUE;
-	} else {
-		if(m_bSampleAfterPause) {
-			VARIANT var;
-			VariantInit(&var);
-			var.vt = VT_UI4;
-			var.ulVal = 1;
-			CHECK_HR(hr = m_pCodecApi->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var));
-			CHECK_HR(hr = pSample->SetUINT32(MFSampleExtension_Discontinuity, TRUE));
-		}
-		m_bSampleAfterPause = FALSE;
-		CHECK_HR (hr = m_pTransform->ProcessInput(0, pSample, 0));
-	}
+	CHECK_HR(hr = m_pSample->GetBufferByIndex(0, &pBufferIn));
+	CHECK_HR(hr = pBufferIn->Lock(&pDataIn, NULL, NULL));
+	memcpy(pDataIn, pGsData, dataSize);
+	CHECK_HR(hr = pBufferIn->Unlock());
+	CHECK_HR(hr = m_pSample->SetSampleTime(sampleTime));
+	CHECK_HR(hr = m_pSample->SetSampleDuration(sampleDuration));
+	CHECK_HR(hr = m_pTransform->ProcessInput(0, m_pSample, 0));
 
 	//Generate the output sample
 	MFT_OUTPUT_DATA_BUFFER mftOutputData;
@@ -356,41 +342,26 @@ HRESULT CEncoderH264::Encode(IMFSample *pSample, BOOL bPause)
 	//If more input is needed there was no output to process. Return and repeat
 	if(hrRes != MF_E_TRANSFORM_NEED_MORE_INPUT) {
 
-//#ifdef DEBUG_MEDIA_TYPES
-//		CHECK_HR (hr =  m_pTransform->GetOutputCurrentType(0, &pMediaType));  
-//		wprintf(L"CEncoderH264::Encode: Actual Compressed Media Type:\n");
-//		LogMediaType(pMediaType);
-//#endif
-		
 		//Get a pointer to the memory
-		CHECK_HR (hr = pBufferOut->Lock(&pData, &cbTotalLength, &cbCurrentLength)); 
-
-//		if(m_pStreamer) {
-			//Extract the actual Timestamp and Duration on the sample from before the compression
-			//The CMSH264EncoderMFT encoder does not seem to output the timestamps in ascending order
-			CHECK_HR(hr = pSample->GetSampleTime(&m_hnsSampleTime)); 
-			CHECK_HR(hr = pSample->GetSampleDuration(&m_hnsSampleDuration)); 
-			//Send the buffer to the Streamer with timestamp adjusted to UTC time
-//			m_pStreamer->SendSample(pData, cbCurrentLength, m_hnsSampleTime, m_hnsSampleDuration);
-//		}
+		CHECK_HR (hr = pBufferOut->Lock(&pDataOut, &cbTotalLength, &cbCurrentLength)); 
 
 		//Write elementary h.264/AAC/AVC data to file
-		if(m_pH264File && !bPause) {
-			fwrite (pData , sizeof(BYTE), cbCurrentLength, m_pH264File);
+		if(m_pH264File) {
+			fwrite (pDataOut , sizeof(BYTE), cbCurrentLength, m_pH264File);
 		}
 
 		CHECK_HR (hr = pBufferOut->Unlock());
-		pData = NULL;
+		pDataOut = NULL;
 
 		//Send Sample to MP4 StreamSink for writing
-		if(m_pStreamSink && !bPause) {
+		if(m_pStreamSink) {
 			hr = m_pStreamSink->ProcessSample(pSampleOut);
 		}
 	}
 
 done:
 
-	if (pData && FAILED(hr))
+	if (pDataOut && FAILED(hr))
 	{
 		pBufferOut->Unlock();
 	}
@@ -421,12 +392,7 @@ HRESULT CEncoderH264::Start()
 		CHECK_HR (hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, NULL));
 		CHECK_HR (hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, NULL));
 	}
-/*
-	//Start Video Streamer
-	if(m_pStreamer) {
-		CHECK_HR (hr = m_pStreamer->Start());
-	}
-*/
+
 done:
 	return hr;
 }
@@ -454,44 +420,131 @@ HRESULT CEncoderH264::Stop()
 done:
 	return hr;
 }
-/*
-HRESULT CEncoderH264::CreateMFSampleFromBitmap(IMFMediaType* pMediaType, UINT nResourceId, IMFSample** pSample)
+
+HRESULT CEncoderH264::CreateUncompressedVideoType(
+	DWORD                fccFormat,  // FOURCC or D3DFORMAT value.     
+	UINT32               width,
+	UINT32               height,
+	MFVideoInterlaceMode interlaceMode,
+	const MFRatio&       frameRate,
+	const MFRatio&       par,
+	IMFMediaType         **ppType
+)
+{
+	if (ppType == NULL)
+	{
+		return E_POINTER;
+	}
+
+	GUID    subtype = MFVideoFormat_Base;
+	LONG    lStride = 0;
+	UINT    cbImage = 0;
+
+	IMFMediaType *pType = NULL;
+
+	// Set the subtype GUID from the FOURCC or D3DFORMAT value.
+	subtype.Data1 = fccFormat;
+
+	HRESULT hr = MFCreateMediaType(&pType);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetGUID(MF_MT_SUBTYPE, subtype);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetUINT32(MF_MT_INTERLACE_MODE, interlaceMode);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = MFSetAttributeSize(pType, MF_MT_FRAME_SIZE, width, height);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	// Calculate the default stride value.
+	hr = pType->SetUINT32(MF_MT_DEFAULT_STRIDE, UINT32(lStride));
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	// Calculate the image size in bytes.
+	hr = MFCalculateImageSize(subtype, width, height, &cbImage);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetUINT32(MF_MT_SAMPLE_SIZE, cbImage);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetUINT32(MF_MT_FIXED_SIZE_SAMPLES, TRUE);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	hr = pType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	// Frame rate
+	hr = MFSetAttributeRatio(pType, MF_MT_FRAME_RATE, frameRate.Numerator,
+		frameRate.Denominator);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	// Pixel aspect ratio
+	hr = MFSetAttributeRatio(pType, MF_MT_PIXEL_ASPECT_RATIO, par.Numerator,
+		par.Denominator);
+	if (FAILED(hr))
+	{
+		goto done;
+	}
+
+	// Return the pointer to the caller.
+	*ppType = pType;
+	(*ppType)->AddRef();
+
+done:
+	SafeRelease(&pType);
+	return hr;
+}
+
+HRESULT CEncoderH264::CreateMFSampleFromMediaType(IMFMediaType* pMediaType, IMFSample** pSample)
 {
 	HRESULT hr = S_OK;
-	IStream* pImageStream = NULL;
-	IWICBitmapSource *pBitmap = NULL;
-	UINT uiWidth = 0, uiHeight = 0;
-	RECT rcFrame = {0, 0, 0, 0};
-	RECT rFile = {0, 0, 0, 0};
-	IMFSample *pRGBSample = NULL;
+	UINT uiWidth = 0, uiHeight = 0, cbBufferSize = 0;
 	IMFSample *pYUVSample = NULL;
 	IMFMediaBuffer *pBuffer = NULL;
-	BYTE *pData = NULL;
 
-	if((pImageStream = CreateStreamOnResource(MAKEINTRESOURCE(nResourceId), L"PNG")) == NULL) {
-		return E_FAIL;
-	}
-	if((pBitmap = LoadBitmapFromStream(pImageStream)) == NULL) {
-		SafeRelease(&pImageStream);
-		return E_FAIL;
-	}
-	CHECK_HR(hr = pBitmap->GetSize((UINT*)&rFile.right, (UINT*)&rFile.bottom));
-	UINT cbStride = rFile.right * 4;
-	UINT cbBufferSize = cbStride * rFile.bottom;
+	CHECK_HR(hr = pMediaType->GetUINT32(MF_MT_SAMPLE_SIZE, &cbBufferSize));
 	CHECK_HR(hr = MFCreateMemoryBuffer(cbBufferSize, &pBuffer));
-	CHECK_HR(hr = pBuffer->Lock(&pData, NULL, NULL));
-	CHECK_HR(hr = pBitmap->CopyPixels(NULL,
-		cbStride,
-		cbBufferSize,
-		reinterpret_cast<BYTE*>(pData)));
-	CHECK_HR(hr = pBuffer->Unlock());
-	CHECK_HR(hr = pBuffer->SetCurrentLength(cbBufferSize));
-	CHECK_HR(hr = MFCreateSample(&pRGBSample));
-	CHECK_HR(hr = pRGBSample->AddBuffer(pBuffer));
-	CHECK_HR(hr = pRGBSample->SetSampleTime(NULL));
-	CHECK_HR(hr = MFGetAttributeSize(pMediaType, MF_MT_FRAME_SIZE, (UINT32*)&rcFrame.right, (UINT32*)&rcFrame.bottom));
-	ColorConvertMFSample(pRGBSample, &pYUVSample, MFVideoFormat_YUY2, rFile, rcFrame);
+	CHECK_HR(hr = MFCreateSample(&pYUVSample));
+	CHECK_HR(hr = pYUVSample->AddBuffer(pBuffer));
 	CHECK_HR(hr = pYUVSample->SetSampleTime(NULL));
+	CHECK_HR(hr = pYUVSample->SetSampleDuration(NULL));
 
 done:
 	if (pYUVSample)
@@ -499,55 +552,30 @@ done:
 		*pSample = pYUVSample;
 		(*pSample)->AddRef();
 	}
-	SafeRelease(&pRGBSample);
 	SafeRelease(&pYUVSample);
-	SafeRelease(&pImageStream);
-	SafeRelease(&pBitmap);
 	return hr;
 }
 
-HRESULT CEncoderH264::ColorConvertMFSample(IMFSample* pSampleIn, IMFSample** pSampleOut, const GUID& guidOutputType, const RECT& rcFile, const RECT& rcFrame)
+HRESULT CEncoderH264::CopyAttribute(IMFAttributes *pSrc, IMFAttributes *pDest, const GUID& key)
 {
-	HRESULT hr = S_OK;
-	IMFMediaType *pTypeIn = NULL;
-	IMFMediaType *pTypeOut = NULL;
-	IMFSample *pSample = NULL;
+	try
+	{
+		PROPVARIANT var;
+		PropVariantInit(&var);
 
-	CVideoProcessor* pVideoProcessor = new CVideoProcessor();
-	CHECK_HR(hr = CreateVideoMediaType(D3DFMT_A8R8G8B8, rcFile.right, rcFile.bottom, &pTypeIn));
-	CHECK_HR(hr = pVideoProcessor->ConfigureTranscoder(pTypeIn, MFVideoFormat_YUY2, rcFrame, &pTypeOut));
-	CHECK_HR(hr = pVideoProcessor->Transcode(pSampleIn, &pSample));
+		HRESULT hr = S_OK;
 
-done:
-	if(pSample) {
-		*pSampleOut = pSample;
-		(*pSampleOut)->AddRef();
+		hr = pSrc->GetItem(key, &var);
+		if (SUCCEEDED(hr))
+		{
+			hr = pDest->SetItem(key, var);
+		}
+
+		PropVariantClear(&var);
+		return hr;
 	}
-	SafeRelease(&pSample);
-	SafeRelease(&pTypeIn);
-	SafeRelease(&pTypeOut);
-	SafeRelease(&pTypeIn);
-	if(pVideoProcessor) {
-		delete pVideoProcessor;
+	catch (...) {
+		return HRESULT_FROM_WIN32(ERROR_UNHANDLED_EXCEPTION);
 	}
-	return hr;
 }
-*/
-HRESULT CEncoderH264::CreateVideoMediaType(D3DFORMAT D3DFmt, DWORD dwWidth, DWORD dwHeight, IMFMediaType **ppMediaType)
-{
-	HRESULT hr = S_OK;
-	IMFMediaType *pMediaType = NULL;
-	MFVIDEOFORMAT format;
 
-	CHECK_HR(hr = MFInitVideoFormat_RGB(&format, dwWidth, dwHeight, D3DFmt));
-	CHECK_HR(hr = MFCreateMediaType(&pMediaType));
-	CHECK_HR(hr = MFInitMediaTypeFromMFVideoFormat(pMediaType, &format, sizeof(format)));
-
-done:
-	if(pMediaType) {
-		*ppMediaType = pMediaType;
-		(*ppMediaType)->AddRef();
-	}
-	SafeRelease(&pMediaType);
-	return hr;
-}
