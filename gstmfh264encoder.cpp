@@ -192,18 +192,29 @@ static GstFlowReturn
 gst_mfh264encoder_handle_frame(GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
 {
 	Gstmfh264encoder *filter = GST_MFH264ENCODER(encoder);
-	GstMapInfo map;
+	GstMapInfo mapIn, mapOut;
 
 	// Encoding is happening here
 	if (filter->pH264Encoder) {
-		gst_buffer_map(frame->input_buffer, &map, GST_MAP_READ);
-		if (filter->pH264Encoder->Encode((BYTE *)map.data, map.size, GST_BUFFER_TIMESTAMP(frame->input_buffer), GST_BUFFER_DURATION(frame->input_buffer)) != S_OK) {
+		gst_buffer_map(frame->input_buffer, &mapIn, GST_MAP_READ);
+		frame->output_buffer = gst_buffer_new_and_alloc(mapIn.size);
+		gst_buffer_map(frame->output_buffer, &mapOut, GST_MAP_WRITE);
+		if (filter->pH264Encoder->Encode(
+			(BYTE *)mapIn.data,
+			mapIn.size,
+			(BYTE *)mapOut.data,
+			(UINT32*)&mapOut.size,
+			GST_BUFFER_TIMESTAMP(frame->input_buffer),
+			GST_BUFFER_DURATION(frame->input_buffer)
+		) != S_OK) {
 		;// Process errors here
 		}
-		gst_buffer_unmap(frame->input_buffer, &map);
-	}
+		GST_BUFFER_TIMESTAMP(frame->output_buffer);
+		GST_BUFFER_DURATION(frame->output_buffer);
 
-	frame->output_buffer = gst_buffer_copy(frame->input_buffer);
+		gst_buffer_unmap(frame->input_buffer, &mapIn);
+		gst_buffer_unmap(frame->output_buffer, &mapOut);
+	}
 
 	return gst_video_encoder_finish_frame(encoder, frame);
 }
@@ -233,11 +244,16 @@ gst_mfh264encoder_set_format(GstVideoEncoder * encoder,	GstVideoCodecState * sta
 		}
 	}
 
-	GstCaps *caps = gst_caps_new_simple("video/x-raw",
-		"format", G_TYPE_STRING, "YUY2",
-		NULL);
-	
 	// Define compressed output format here
+	GstCaps *caps = gst_caps_new_simple("video/x-h264",
+		"format", G_TYPE_STRING, "h264",
+		"width", G_TYPE_INT, GST_VIDEO_INFO_WIDTH(info),
+		"height", G_TYPE_INT, GST_VIDEO_INFO_HEIGHT(info),
+		"framerate", GST_TYPE_FRACTION, info->fps_n, info->fps_d,
+		"pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1,
+		"interlace-mode", G_TYPE_STRING, gst_video_interlace_mode_to_string(GST_VIDEO_INTERLACE_MODE_PROGRESSIVE),
+		NULL);
+
 	GstVideoCodecState *output_format = gst_video_encoder_set_output_state(encoder, caps, state);
 	gst_video_codec_state_unref(output_format);
 
@@ -247,8 +263,16 @@ gst_mfh264encoder_set_format(GstVideoEncoder * encoder,	GstVideoCodecState * sta
 static GstCaps *
 gst_mfh264encoderc_getcaps(GstVideoEncoder * encoder, GstCaps * filter)
 {
+	// We need to give format option here. Supported formats are: 
+	//   MFVideoFormat_I420
+	//   MFVideoFormat_IYUV
+	//   MFVideoFormat_NV12
+	//   MFVideoFormat_YUY2
+	//   MFVideoFormat_YV12
 	GstCaps *caps = gst_caps_new_simple("video/x-raw",
 		"format", G_TYPE_STRING, "YUY2",
+		"pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1,
+		"interlace-mode", G_TYPE_STRING, gst_video_interlace_mode_to_string(GST_VIDEO_INTERLACE_MODE_PROGRESSIVE),
 		NULL);
 	return caps;
 }

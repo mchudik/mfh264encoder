@@ -50,7 +50,7 @@ public:
 	void Exiting() { m_bExiting = true; };
 
 	HRESULT ConfigureEncoder(DWORD fccFormat, UINT32 width, UINT32 height, MFRatio frameRate, UINT nVBRQuality, UINT nMeanBitrate, UINT nMaxBitrate);
-	HRESULT Encode(BYTE *pData, UINT32 dataSize, LONGLONG sampleTime, LONGLONG sampleDuration);
+	HRESULT Encode(BYTE* pYuvData, UINT32 nYuvSize, BYTE* pH264Data, UINT32* nH264Size, LONGLONG sampleTime, LONGLONG sampleDuration);
 	HRESULT Start();
 	HRESULT Stop();
 

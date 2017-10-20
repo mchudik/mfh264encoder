@@ -291,7 +291,7 @@ done:
 	return hr;
 }
 
-HRESULT CEncoderH264::Encode(BYTE *pGsData, UINT32 dataSize, LONGLONG sampleTime, LONGLONG sampleDuration)
+HRESULT CEncoderH264::Encode(BYTE* pYuvData, UINT32 nYuvSize, BYTE* pH264Data, UINT32* nH264Size, LONGLONG sampleTime, LONGLONG sampleDuration)
 {
 	if (!m_pSample)
 	{
@@ -323,7 +323,7 @@ HRESULT CEncoderH264::Encode(BYTE *pGsData, UINT32 dataSize, LONGLONG sampleTime
 	//Send input to the encoder.
 	CHECK_HR(hr = m_pSample->GetBufferByIndex(0, &pBufferIn));
 	CHECK_HR(hr = pBufferIn->Lock(&pDataIn, NULL, NULL));
-	memcpy(pDataIn, pGsData, dataSize);
+	memcpy(pDataIn, pYuvData, nYuvSize);
 	CHECK_HR(hr = pBufferIn->Unlock());
 	CHECK_HR(hr = m_pSample->SetSampleTime(sampleTime));
 	CHECK_HR(hr = m_pSample->SetSampleDuration(sampleDuration));
@@ -344,6 +344,9 @@ HRESULT CEncoderH264::Encode(BYTE *pGsData, UINT32 dataSize, LONGLONG sampleTime
 
 		//Get a pointer to the memory
 		CHECK_HR (hr = pBufferOut->Lock(&pDataOut, &cbTotalLength, &cbCurrentLength)); 
+		
+		*nH264Size = cbCurrentLength;
+		memcpy(pH264Data, pDataOut, *nH264Size);
 
 		//Write elementary h.264/AAC/AVC data to file
 		if(m_pH264File) {
